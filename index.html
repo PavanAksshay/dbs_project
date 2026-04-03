@@ -9,6 +9,7 @@
         href="https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=DM+Sans:ital,wght@0,300;0,400;0,500;1,300&display=swap"
         rel="stylesheet">
     <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js"></script>
 
     <style>
         *,
@@ -616,15 +617,26 @@
         let maxPassengers = 1;
         let isSignupMode = false; // Tracks Auth Panel Mode
 
-        // Set 5-Day Limit on Date Input
+        // Set 5-Day Limit on Date Input (Local Timezone Fixed)
         const dateInput = document.getElementById('searchDate');
+
         const today = new Date();
         const maxDate = new Date();
         maxDate.setDate(today.getDate() + 5);
-        const formatIso = (date) => date.toISOString().split('T')[0];
-        dateInput.min = formatIso(today);
-        dateInput.max = formatIso(maxDate);
-        dateInput.value = formatIso(today);
+
+        // This custom function grabs the exact local year, month, and day
+        // padding them with zeros (e.g., '04') so HTML can read them perfectly.
+        const formatLocal = (d) => {
+            const year = d.getFullYear();
+            const month = String(d.getMonth() + 1).padStart(2, '0');
+            const day = String(d.getDate()).padStart(2, '0');
+            return `${year}-${month}-${day}`;
+        };
+
+        // Apply the strictly local dates to the calendar
+        dateInput.min = formatLocal(today);
+        dateInput.max = formatLocal(maxDate);
+        dateInput.value = formatLocal(today);
 
         function switchTab(tabName) {
             document.querySelectorAll('.nav-links a').forEach(a => a.classList.remove('active'));
@@ -770,7 +782,7 @@
             const { data, error } = await _supabase.from('bookings').select(`
       id, seat_number, status,
       trips ( departure_time, price, routes(origin, destination), buses(bus_number, bus_type) )
-    `).eq('user_id', currentUser.id).order('id', { ascending: false });
+    `).eq('user_id', currentUser.id).order('booking_date', { ascending: false });
 
             if (error || data.length === 0) { list.innerHTML = 'You have no upcoming trips.'; return; }
 
@@ -784,9 +796,10 @@
             <div style="color:var(--muted); font-size:0.85rem; margin-bottom:8px;">${date} • ${b.trips.buses.bus_type} (${b.trips.buses.bus_number})</div>
             <div style="font-size:0.9rem;">Seat: <span style="color:var(--teal); font-weight:bold;">${b.seat_number}</span></div>
           </div>
-          <div style="text-align: right;">
+          <div style="text-align: right; display: flex; flex-direction: column; align-items: flex-end; gap: 8px;">
             <div class="booking-status">✓ Confirmed</div>
-            <div style="margin-top: 10px; font-weight:bold;">₹${b.trips.price}</div>
+            <div style="font-weight:bold;">₹${b.trips.price}</div>
+            <button onclick="downloadTicket('${b.id}')" style="background: transparent; color: var(--teal); border: 1px solid var(--teal); padding: 4px 10px; border-radius: 6px; font-size: 0.75rem; font-weight: bold; cursor: pointer;">📥 Download Ticket</button>
           </div>
         </div>
       `);
@@ -839,10 +852,10 @@
             selectedSeats.clear();
 
             const { data: trip, error } = await _supabase.from('trips').select(`
-      departure_time, price, 
-      routes(origin, destination, boarding_points, dropping_points), 
-      buses(bus_type, capacity)
-    `).eq('id', tripId).single();
+            departure_time, price, 
+            routes(origin, destination, boarding_points, dropping_points), 
+            buses(bus_type, capacity)
+            `).eq('id', tripId).single();
 
             if (error) return;
 
@@ -923,11 +936,17 @@
         async function confirmSeatBooking() {
             if (selectedSeats.size === 0) { alert('Please select at least one seat.'); return; }
 
+            // Grab the choices from the dropdowns!
+            const bPoint = document.getElementById('boardingPointSelect').value;
+            const dPoint = document.getElementById('droppingPointSelect').value;
+
             const bookingRecords = Array.from(selectedSeats).map(seat => ({
                 user_id: currentUser.id,
                 trip_id: currentTripId,
                 seat_number: seat,
-                status: 'confirmed'
+                status: 'confirmed',
+                boarding_point: bPoint,     // Saving the boarding point
+                dropping_point: dPoint      // Saving the dropping point
             }));
 
             const { error } = await _supabase.from('bookings').insert(bookingRecords);
@@ -936,6 +955,132 @@
             else {
                 alert(`✅ Success! You have booked ${selectedSeats.size} seat(s).`);
                 switchTab('bookings');
+            }
+        }
+
+        // ==========================================
+        // PDF TICKET GENERATOR (Pro Version - Layout Fixed)
+        // ==========================================
+        // ==========================================
+        // PDF TICKET GENERATOR (Sizing & Layout Fixed)
+        // ==========================================
+        async function downloadTicket(bookingId) {
+            try {
+                // 1. Fetch booking
+                const { data: b, error: bookingError } = await _supabase.from('bookings').select(`
+                    id, seat_number, status, booking_date, user_id, boarding_point, dropping_point,
+                    trips ( departure_time, arrival_time, price, routes(origin, destination), buses(bus_number, bus_type) )
+                `).eq('id', bookingId).single();
+
+                if (bookingError) throw bookingError;
+
+                // 2. Fetch profile data
+                const { data: profile } = await _supabase.from('profiles').select('full_name, phone_number').eq('id', b.user_id).single();
+
+                // 3. Format Dates & Times
+                const depDate = new Date(b.trips.departure_time).toLocaleString([], { month: 'short', day: 'numeric', year: 'numeric', hour: '2-digit', minute: '2-digit' });
+                const arrDate = new Date(b.trips.arrival_time).toLocaleString([], { month: 'short', day: 'numeric', year: 'numeric', hour: '2-digit', minute: '2-digit' });
+                const bookDate = new Date(b.booking_date).toLocaleString();
+
+                // 4. Safe fallbacks
+                const fallbackName = currentUser?.user_metadata?.full_name || currentUser?.email;
+                const passengerName = profile?.full_name || fallbackName || 'Valued Passenger';
+                const passengerPhone = profile?.phone_number || currentUser?.user_metadata?.phone || 'Not Provided';
+
+                const boardPoint = b.boarding_point || 'Main City Bus Stand';
+                const dropPoint = b.dropping_point || 'Main City Bus Stand';
+
+                // 5. Create the Ticket HTML Layout (Reduced outer padding to save space)
+                const ticketDiv = document.createElement('div');
+                ticketDiv.style.padding = '20px';
+                ticketDiv.style.fontFamily = 'Helvetica, Arial, sans-serif';
+                ticketDiv.style.color = '#111';
+                ticketDiv.style.background = '#fff';
+                ticketDiv.style.width = '650px';
+
+                // Reduced inner padding and margins slightly so it fits perfectly on one page
+                ticketDiv.innerHTML = `
+                <div style="border: 2px solid #1da8a0; border-radius: 12px; padding: 25px;">
+                    <div style="display: flex; justify-content: space-between; align-items: flex-start; border-bottom: 2px solid #f0f0f0; padding-bottom: 15px; margin-bottom: 15px;">
+                        <div style="flex: 1;">
+                            <h1 style="color: #1da8a0; margin: 0; font-size: 32px; font-weight: 800;">OmniGo</h1>
+                            <p style="margin: 5px 0 0 0; color: #666; font-size: 14px; text-transform: uppercase; letter-spacing: 1px;">Official e-Ticket</p>
+                        </div>
+                        <div style="text-align: right; display: flex; gap: 15px; align-items: flex-start; max-width: 55%;">
+                            <div style="flex: 1; min-width: 0;">
+                                <p style="margin: 0; font-size: 12px; color: #888;">PNR / Booking ID</p>
+                                <h3 style="margin: 5px 0 0 0; font-family: monospace; font-size: 14px; word-break: break-all;">OMNI-${b.id}</h3>
+                            </div>
+                            <img src="https://api.qrserver.com/v1/create-qr-code/?size=80x80&data=OMNI-${b.id}" crossorigin="anonymous" alt="QR Code" style="width: 80px; height: 80px; flex-shrink: 0; border-radius: 4px; border: 1px solid #ddd; padding: 4px;">
+                        </div>
+                    </div>
+
+                    <h2 style="margin: 0 0 15px 0; font-size: 24px; color: #0f1c2e;">${b.trips.routes.origin} &rarr; ${b.trips.routes.destination}</h2>
+
+                    <div style="background: #f8f9fa; padding: 15px; border-radius: 8px; margin-bottom: 15px; border: 1px solid #eee;">
+                        <table style="width: 100%; text-align: left; border-collapse: collapse;">
+                            <tr>
+                                <td style="padding-bottom: 12px; color: #666; font-size: 13px; width: 30%;">Passenger Name</td>
+                                <td style="padding-bottom: 12px; font-weight: bold; font-size: 16px;">${passengerName}</td>
+                            </tr>
+                            <tr>
+                                <td style="padding-bottom: 12px; color: #666; font-size: 13px;">Contact Phone</td>
+                                <td style="padding-bottom: 12px; font-weight: bold; font-size: 14px;">${passengerPhone}</td>
+                            </tr>
+                            <tr>
+                                <td style="padding-bottom: 12px; color: #666; font-size: 13px;">Bus Details</td>
+                                <td style="padding-bottom: 12px; font-weight: bold; font-size: 14px;">${b.trips.buses.bus_type} (${b.trips.buses.bus_number})</td>
+                            </tr>
+                            <tr>
+                                <td style="padding-bottom: 12px; color: #666; font-size: 13px;">Seat Number</td>
+                                <td style="padding-bottom: 12px; font-weight: 800; color: #1da8a0; font-size: 18px;">${b.seat_number}</td>
+                            </tr>
+                            <tr><td colspan="2"><hr style="border: 0; border-top: 1px solid #ddd; margin: 5px 0 12px 0;"></td></tr>
+                            <tr>
+                                <td style="padding-bottom: 10px; color: #666; font-size: 13px;">Boarding Point</td>
+                                <td style="padding-bottom: 10px;">
+                                    <strong style="font-size: 14px;">${boardPoint}</strong><br>
+                                    <span style="color: #555; font-size: 12px;">🕒 ${depDate}</span>
+                                </td>
+                            </tr>
+                            <tr>
+                                <td style="color: #666; font-size: 13px;">Dropping Point</td>
+                                <td>
+                                    <strong style="font-size: 14px;">${dropPoint}</strong><br>
+                                    <span style="color: #555; font-size: 12px;">🕒 ${arrDate}</span>
+                                </td>
+                            </tr>
+                        </table>
+                    </div>
+
+                    <div style="display: flex; justify-content: space-between; align-items: flex-end; border-top: 2px solid #f0f0f0; padding-top: 15px;">
+                        <div>
+                            <p style="margin: 0 0 4px 0; font-size: 12px; color: #999;">Booked on: ${bookDate}</p>
+                            <p style="margin: 0; font-size: 12px; color: #555; font-weight: bold;">For more details, contact the administrator:<br>Ph: +91 7010712375</p>
+                        </div>
+                        <div style="text-align: right;">
+                            <h3 style="margin: 0 0 5px 0; font-size: 24px; color: #1da8a0;">Total Paid: ₹${b.trips.price}</h3>
+                            <p style="margin: 0; font-size: 13px; font-weight: bold; color: #f4a535; font-style: italic;">Have a Safe Journey With Us</p>
+                        </div>
+                    </div>
+                </div>
+            `;
+
+                // 6. Configure PDF options with custom margins
+                const opt = {
+                    margin: [0.3, 0.5, 0.3, 0.5], // Top, Right, Bottom, Left (gives more breathing room vertically)
+                    filename: 'OmniGo_Ticket_' + b.id + '.pdf',
+                    image: { type: 'jpeg', quality: 0.98 },
+                    html2canvas: { scale: 2, useCORS: true },
+                    jsPDF: { unit: 'in', format: 'letter', orientation: 'portrait' }
+                };
+
+                html2pdf().set(opt).from(ticketDiv).save();
+
+            }
+            catch (err) {
+                console.error("PDF Generation Error:", err);
+                alert("Oops! Something went wrong while generating the ticket. Check the browser console for details.");
             }
         }
 
