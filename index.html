@@ -682,8 +682,17 @@
                 const name = document.getElementById('nameInput').value.trim();
                 const phone = document.getElementById('phoneInput').value.trim();
 
-                if (!name || !phone) { msg.textContent = "Name and Phone are required for sign up."; return; }
+                if (!name || !phone) {
+                    msg.textContent = "Name and Phone are required for sign up.";
+                    return;
+                }
 
+                const phoneRegex = /^[0-9]{10}$/;
+
+                if (!phoneRegex.test(phone)) {
+                    msg.textContent = "Please enter a valid 10-digit phone number.";
+                    return;
+                }
                 msg.textContent = "Creating account...";
                 const { data, error } = await _supabase.auth.signUp({
                     email: email,
